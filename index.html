@@ -486,6 +486,132 @@
   @media (max-width: 400px) {
     .card { padding: 24px 20px; }
   }
+
+  /* カレンダー */
+  .calendar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 14, 20, 0.85);
+    backdrop-filter: blur(8px);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .calendar-overlay.show { display: flex; animation: fadeIn 0.2s ease; }
+
+  .calendar-modal {
+    width: 100%;
+    max-width: 340px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    animation: fadeSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .calendar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .calendar-month-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: 400;
+    color: var(--text-primary);
+  }
+
+  .calendar-weekdays {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    margin-bottom: 4px;
+  }
+  .calendar-weekdays span {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 4px;
+  }
+
+  .calendar-day {
+    position: relative;
+    aspect-ratio: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .calendar-day.empty {
+    cursor: default;
+  }
+
+  .calendar-day:not(.empty):hover {
+    background: var(--bg-hover);
+    border-color: var(--border-bright);
+    color: var(--text-primary);
+  }
+
+  .calendar-day.has-entry {
+    color: var(--text-primary);
+  }
+
+  .calendar-day.has-entry::after {
+    content: '';
+    position: absolute;
+    bottom: 4px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .calendar-day.is-today {
+    border-color: var(--accent-dim);
+  }
+
+  .calendar-day.is-selected {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+
+  .calendar-close-btn {
+    width: 100%;
+    margin-top: 16px;
+    padding: 10px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: 'IBM Plex Sans', sans-serif;
+  }
+
+  .calendar-close-btn:hover {
+    border-color: var(--border-bright);
+    color: var(--text-primary);
+  }
 </style>
 </head>
 <body>
@@ -499,6 +625,7 @@
       <button class="date-nav-btn" onclick="changeDate(-1)">‹</button>
       <input type="date" class="date-input" id="dateInput" onchange="onDateInputChange()">
       <button class="date-nav-btn" onclick="changeDate(1)">›</button>
+      <button class="date-nav-btn" onclick="openCalendar()">📅</button>
       <button class="today-btn" onclick="setToday()">今日</button>
     </div>
   </div>
@@ -536,6 +663,22 @@
   <div class="sent-icon">✓</div>
   <div class="sent-message">記録完了</div>
   <div class="sent-sub">tap to continue</div>
+</div>
+
+<!-- カレンダー -->
+<div class="calendar-overlay" id="calendarOverlay" onclick="closeCalendar()">
+  <div class="calendar-modal" onclick="event.stopPropagation()">
+    <div class="calendar-header">
+      <button class="date-nav-btn" onclick="calendarChangeMonth(-1)">‹</button>
+      <div class="calendar-month-label" id="calendarMonthLabel"></div>
+      <button class="date-nav-btn" onclick="calendarChangeMonth(1)">›</button>
+    </div>
+    <div class="calendar-weekdays">
+      <span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span>
+    </div>
+    <div class="calendar-grid" id="calendarGrid"></div>
+    <button class="calendar-close-btn" onclick="closeCalendar()">閉じる</button>
+  </div>
 </div>
 
 <script>
@@ -939,6 +1082,87 @@
         numberEl.textContent = index + 1;
       }
     });
+  }
+
+  // カレンダー機能
+  let calendarViewDate = new Date();
+  let entryDatesSet = new Set();
+
+  function formatDateStr(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  async function openCalendar() {
+    calendarViewDate = new Date(selectedDate);
+    document.getElementById('calendarOverlay').classList.add('show');
+    renderCalendar(); // 先に現在の内容で描画し、体感待ちを減らす
+    await fetchEntryDates();
+    renderCalendar();
+  }
+
+  function closeCalendar() {
+    document.getElementById('calendarOverlay').classList.remove('show');
+  }
+
+  async function fetchEntryDates() {
+    try {
+      const response = await fetch(`${GAS_URL}?action=dates`);
+      const data = await response.json();
+      entryDatesSet = new Set(data.dates || []);
+    } catch (err) {
+      console.log('カレンダー用データ取得失敗:', err.message);
+      entryDatesSet = new Set();
+    }
+  }
+
+  function calendarChangeMonth(delta) {
+    calendarViewDate.setMonth(calendarViewDate.getMonth() + delta);
+    renderCalendar();
+  }
+
+  function renderCalendar() {
+    const year = calendarViewDate.getFullYear();
+    const month = calendarViewDate.getMonth(); // 0始まり
+
+    document.getElementById('calendarMonthLabel').textContent = `${year}年${month + 1}月`;
+
+    const grid = document.getElementById('calendarGrid');
+    grid.innerHTML = '';
+
+    const firstWeekday = new Date(year, month, 1).getDay(); // 0=日
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+    const todayStr = formatDateStr(new Date());
+    const selectedStr = document.getElementById('dateInput').value;
+
+    for (let i = 0; i < firstWeekday; i++) {
+      const empty = document.createElement('div');
+      empty.className = 'calendar-day empty';
+      grid.appendChild(empty);
+    }
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const cell = document.createElement('button');
+      cell.type = 'button';
+      cell.className = 'calendar-day';
+      cell.textContent = d;
+      if (entryDatesSet.has(dateStr)) cell.classList.add('has-entry');
+      if (dateStr === todayStr) cell.classList.add('is-today');
+      if (dateStr === selectedStr) cell.classList.add('is-selected');
+      cell.onclick = () => selectCalendarDate(dateStr);
+      grid.appendChild(cell);
+    }
+  }
+
+  function selectCalendarDate(dateStr) {
+    document.getElementById('dateInput').value = dateStr;
+    updateDateDisplay();
+    loadExistingData();
+    closeCalendar();
   }
 </script>
 </body>
