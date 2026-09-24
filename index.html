@@ -692,6 +692,102 @@
   let entryCount = 0;
   let selectedDate = new Date();
   let currentUpdateRow = null; // 更新対象の行番号
+  let isDirty = false; // 未保存の入力があるかどうか（読み込みで上書きしないためのフラグ）
+
+  // ======================================================
+  // 送信できなかった記録の退避キュー（localStorage）
+  // 送信前にまずここへ書き、サーバーへの反映を読み返して確認できたら消す。
+  // 確認できなければ、次にこのアプリを開いたとき／その日付を開いたときに再送する。
+  // ======================================================
+  const PENDING_KEY = 'dr_pending_saves';
+
+  function getPendingSaves() {
+    try { return JSON.parse(localStorage.getItem(PENDING_KEY) || '[]'); }
+    catch (e) { return []; }
+  }
+  function setPendingSaves(list) {
+    try { localStorage.setItem(PENDING_KEY, JSON.stringify(list)); } catch (e) {}
+  }
+  function upsertPendingSave(record) {
+    const list = getPendingSaves().filter(p => p.date !== record.date);
+    list.push(record);
+    setPendingSaves(list);
+  }
+  function removePendingSave(date) {
+    setPendingSaves(getPendingSaves().filter(p => p.date !== date));
+  }
+  function getPendingSaveFor(date) {
+    return getPendingSaves().find(p => p.date === date) || null;
+  }
+  function currentDateStr() {
+    const y = selectedDate.getFullYear();
+    const m = String(selectedDate.getMonth() + 1).padStart(2, '0');
+    const d = String(selectedDate.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  const _syncingDates = new Set(); // 同じ日付を同時に二重送信しないためのガード
+
+  // record を送信し、本当にサーバーに届いたかを読み返して確認する。
+  // 確認できれば退避キューから消す。確認できなければキューに残し、次の機会に再送する。
+  async function syncPendingRecord(record, maxVerifyRetries = 2) {
+    if (_syncingDates.has(record.date)) return;
+    _syncingDates.add(record.date);
+
+    try {
+      try {
+        await fetch(GAS_URL, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ date: record.date, entries: record.entries, updateRow: record.updateRow })
+        });
+      } catch (err) {
+        console.log('再送信できませんでした（オフラインの可能性）:', record.date, err.message);
+        return; // 送れなかった → キューに残したまま終了（次の機会に再送）
+      }
+
+      for (let i = 0; i < maxVerifyRetries; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        try {
+          const response = await fetch(`${GAS_URL}?date=${record.date}`, { method: 'GET' });
+          const data = await response.json();
+          const confirmed = data.status === 'found' && Array.isArray(data.entries) &&
+            JSON.stringify(data.entries) === JSON.stringify(record.entries);
+
+          if (confirmed) {
+            removePendingSave(record.date);
+            console.log('退避していた記録の同期を確認しました:', record.date);
+
+            // 今まさにこの日付を見ている場合は、行番号などを静かに最新化する
+            if (currentDateStr() === record.date) {
+              currentUpdateRow = data.row;
+              if (!isDirty) {
+                setStatus('前回送信できなかった記録の再送に成功しました', 'success');
+                setTimeout(() => setStatus('', ''), 3000);
+              }
+            }
+            return;
+          }
+        } catch (err) {
+          console.log('確認の読み込みに失敗しました:', record.date, err.message);
+        }
+      }
+      console.log('まだサーバーへの反映を確認できませんでした。次の機会に再送します:', record.date);
+    } finally {
+      _syncingDates.delete(record.date);
+    }
+  }
+
+  // 溜まっている退避データを、次にアプリを開いたタイミングでまとめて再送する
+  async function flushPendingSaves() {
+    const list = getPendingSaves();
+    if (list.length === 0) return;
+    console.log(`未送信の記録が${list.length}件あります。再送を試みます。`);
+    for (const record of list) {
+      await syncPendingRecord(record);
+    }
+  }
 
   // 初期化
   window.addEventListener('DOMContentLoaded', () => {
@@ -700,6 +796,7 @@
     for (let i = 0; i < 3; i++) {
       addEntry();
     }
+    flushPendingSaves(); // 前回送れなかった記録があれば再送する
     console.log('アプリ初期化完了');
   });
 
@@ -762,10 +859,38 @@
 
   // 既存データの読み込み
   async function loadExistingData() {
+    // 入力中の内容がある場合は、読み込みで上書きしない（データ消失防止）
+    if (isDirty) {
+      console.log('未保存の入力があるため読み込みをスキップしました');
+      setStatus('未保存の入力があるため、この日の読み込みを保留しました', 'success');
+      return;
+    }
+
     const year = selectedDate.getFullYear();
     const month = String(selectedDate.getMonth() + 1).padStart(2, '0');
     const day = String(selectedDate.getDate()).padStart(2, '0');
     const dateStr = `${year}-${month}-${day}`;
+
+    // この日付に送信できていない記録が残っている場合は、サーバーの（古い）内容より
+    // そちらを優先して表示し、裏で再送する
+    const pending = getPendingSaveFor(dateStr);
+    if (pending) {
+      currentUpdateRow = pending.updateRow;
+      document.getElementById('entriesContainer').innerHTML = '';
+      entryCount = 0;
+      pending.entries.forEach(entry => {
+        addEntry();
+        const inputs = document.querySelectorAll('.entry-input');
+        inputs[inputs.length - 1].value = entry;
+      });
+      while (entryCount < 3) {
+        addEntry();
+      }
+      isDirty = false;
+      setStatus('前回送信できなかった内容を表示しています（再送中…）', 'sending');
+      syncPendingRecord(pending);
+      return;
+    }
 
     try {
       const response = await fetch(`${GAS_URL}?date=${dateStr}`, {
@@ -773,30 +898,37 @@
       });
 
       const data = await response.json();
-      
+
+      // 通信を待っている間に入力が始まっていたら、ここでも上書きしない
+      if (isDirty) {
+        console.log('読み込み完了時点で未保存の入力があったため、反映をスキップしました');
+        return;
+      }
+
       if (data.status === 'found' && data.entries && data.entries.length > 0) {
         // 既存データがある場合
         currentUpdateRow = data.row;
-        
+
         // 入力欄をクリア
         document.getElementById('entriesContainer').innerHTML = '';
         entryCount = 0;
-        
+
         // 既存データを入力欄に設定
         data.entries.forEach(entry => {
           addEntry();
           const inputs = document.querySelectorAll('.entry-input');
           inputs[inputs.length - 1].value = entry;
         });
-        
+
         // 最低3つは表示
         while (entryCount < 3) {
           addEntry();
         }
-        
+        isDirty = false; // 読み込み直後は「未保存の入力」なし
+
         setStatus('既存データを読み込みました（編集可能）', 'success');
         setTimeout(() => setStatus('', ''), 3000);
-        
+
       } else {
         // 新規作成モード
         currentUpdateRow = null;
@@ -805,9 +937,10 @@
         for (let i = 0; i < 3; i++) {
           addEntry();
         }
+        isDirty = false;
         setStatus('', '');
       }
-      
+
     } catch (err) {
       console.log('データ読み込み中:', err.message);
       // エラーでも新規作成モードで続行（エラーメッセージは表示しない）
@@ -816,6 +949,7 @@
         for (let i = 0; i < 3; i++) {
           addEntry();
         }
+        isDirty = false;
       }
     }
   }
@@ -842,10 +976,11 @@
     
     const textarea = row.querySelector('.entry-input');
     
-    // 自動リサイズ
+    // 自動リサイズ + 未保存フラグを立てる（読み込みに上書きされないようにする）
     textarea.addEventListener('input', function() {
       this.style.height = 'auto';
       this.style.height = this.scrollHeight + 'px';
+      isDirty = true;
     });
     
     // Tabキー対応
@@ -892,101 +1027,24 @@
       return;
     }
 
-    const mode = currentUpdateRow ? '更新' : '記録';
-    setStatus(`${mode}中…`, 'sending');
     document.getElementById('submitBtn').disabled = true;
 
-    try {
-      const year = selectedDate.getFullYear();
-      const month = String(selectedDate.getMonth() + 1).padStart(2, '0');
-      const day = String(selectedDate.getDate()).padStart(2, '0');
-      const dateStr = `${year}-${month}-${day}`;
+    const dateStr = currentDateStr();
+    const record = { date: dateStr, entries: entries, updateRow: currentUpdateRow };
 
-      const payload = {
-        date: dateStr,
-        entries: entries,
-        updateRow: currentUpdateRow
-      };
+    console.log('送信データ:', JSON.stringify(record));
+    console.log('送信先URL:', GAS_URL);
 
-      console.log('送信データ:', JSON.stringify(payload));
-      console.log('送信先URL:', GAS_URL);
+    // 送信を試す前に、まずローカルへ退避しておく
+    // （このあと送信中にタブを閉じたり通信が失敗したりしても、記録そのものは消えない）
+    upsertPendingSave(record);
 
-      // no-corsモードで送信（レスポンスは見えないが、GASには届く）
-      await fetch(GAS_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 
-          'Content-Type': 'text/plain;charset=utf-8'
-        },
-        body: JSON.stringify(payload)
-      });
+    // 送信を待たせず、まず完了表示にする（今の内容はこれから送信するので「未保存」ではなくなる）
+    isDirty = false;
+    showSentOverlay();
 
-      console.log('送信完了（スプレッドシートを確認してください）');
-
-      showSentOverlay();
-      
-      // 送信後、十分待ってからデータを再読み込み（リトライ付き）
-      setTimeout(async () => {
-        await loadExistingDataWithRetry(dateStr, 3);
-      }, 3500); // 3.5秒待つ
-
-    } catch (err) {
-      console.error('送信エラー:', err);
-      setStatus('送信に失敗しました。スプレッドシートを確認してください。', 'error');
-      document.getElementById('submitBtn').disabled = false;
-    }
-  }
-
-  // リトライ機能付きデータ読み込み
-  async function loadExistingDataWithRetry(dateStr, maxRetries = 3) {
-    for (let i = 0; i < maxRetries; i++) {
-      console.log(`データ読み込み試行 ${i + 1}/${maxRetries}`);
-      
-      try {
-        const response = await fetch(`${GAS_URL}?date=${dateStr}`, {
-          method: 'GET',
-        });
-
-        const data = await response.json();
-        
-        if (data.status === 'found' && data.entries && data.entries.length > 0) {
-          // データが見つかった
-          currentUpdateRow = data.row;
-          
-          // 入力欄をクリア
-          document.getElementById('entriesContainer').innerHTML = '';
-          entryCount = 0;
-          
-          // 既存データを入力欄に設定
-          data.entries.forEach(entry => {
-            addEntry();
-            const inputs = document.querySelectorAll('.entry-input');
-            inputs[inputs.length - 1].value = entry;
-          });
-          
-          // 最低3つは表示
-          while (entryCount < 3) {
-            addEntry();
-          }
-          
-          setStatus('保存完了（編集モード）', 'success');
-          console.log('データ読み込み成功');
-          return; // 成功したので終了
-        }
-      } catch (err) {
-        console.log(`読み込み試行失敗 (${i + 1}/${maxRetries}):`, err.message);
-      }
-      
-      // リトライ前に待機（最後の試行では待たない）
-      if (i < maxRetries - 1) {
-        await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒待つ
-      }
-    }
-    
-    // 全ての試行が失敗した場合（エラーは表示しない）
-    console.log('データ読み込みタイムアウト（保存は成功しています）');
-    setStatus('保存完了', 'success');
-    setTimeout(() => setStatus('', ''), 2000);
+    // 実際の送信と、本当に届いたかの確認・必要なら再送は、すべて裏で行う
+    syncPendingRecord(record);
   }
 
   function setStatus(msg, type) {
