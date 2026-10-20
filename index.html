@@ -689,6 +689,33 @@
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/17YrrxS88iokyfYPO_YXWJVdXlLgSx0OyQe4Ech6jqbo';
   // ======================================================
 
+  // ── 合言葉（アクセスキー）──
+  // このファイルは公開リポジトリにあるため、キーはコードに書かない。
+  // 初回に入力した合言葉をこの端末のlocalStorageに保存する（保存できない環境ではこの画面を開いている間だけ保持）。
+  const KEY_STORE = 'dr_access_key';
+  let _accessKey = '';
+  function getAccessKey() {
+    if (_accessKey) return _accessKey;
+    try { _accessKey = localStorage.getItem(KEY_STORE) || ''; } catch (e) {}
+    return _accessKey;
+  }
+  function askAccessKey(msg) {
+    const v = (prompt(msg || '合言葉を入力してください') || '').trim();
+    if (v) {
+      _accessKey = v;
+      try { localStorage.setItem(KEY_STORE, v); } catch (e) {}
+    }
+    return _accessKey;
+  }
+  function forgetAccessKey() {
+    _accessKey = '';
+    try { localStorage.removeItem(KEY_STORE); } catch (e) {}
+  }
+  // GET用のURL（合言葉を付ける）
+  function gasGetUrl(params) {
+    return GAS_URL + '?' + new URLSearchParams({ ...params, key: getAccessKey() }).toString();
+  }
+
   let entryCount = 0;
   let selectedDate = new Date();
   let currentUpdateRow = null; // 更新対象の行番号
@@ -735,12 +762,17 @@
     _syncingDates.add(record.date);
 
     try {
+      // 合言葉が未入力なら尋ねる（入力しなければ送らず、記録は端末に退避したまま残る）
+      if (!getAccessKey() && !askAccessKey()) {
+        setStatus('合言葉が未入力のため送信できていません（記録は端末に残っています）', 'error');
+        return;
+      }
       try {
         await fetch(GAS_URL, {
           method: 'POST',
           mode: 'no-cors',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({ date: record.date, entries: record.entries, updateRow: record.updateRow })
+          body: JSON.stringify({ date: record.date, entries: record.entries, updateRow: record.updateRow, key: getAccessKey() })
         });
       } catch (err) {
         console.log('再送信できませんでした（オフラインの可能性）:', record.date, err.message);
@@ -750,8 +782,14 @@
       for (let i = 0; i < maxVerifyRetries; i++) {
         await new Promise(resolve => setTimeout(resolve, 1500));
         try {
-          const response = await fetch(`${GAS_URL}?date=${record.date}`, { method: 'GET' });
+          const response = await fetch(gasGetUrl({ date: record.date }), { method: 'GET' });
           const data = await response.json();
+          if (data.status === 'unauthorized') {
+            // 合言葉が違う：保存済みのものを捨てる。記録は端末に残り、次に正しい合言葉を入れたときに再送される
+            forgetAccessKey();
+            setStatus('合言葉が違うため送信できていません（記録は端末に残っています）。開き直して合言葉を入力してください', 'error');
+            return;
+          }
           const confirmed = data.status === 'found' && Array.isArray(data.entries) &&
             JSON.stringify(data.entries) === JSON.stringify(record.entries);
 
@@ -892,12 +930,28 @@
       return;
     }
 
+    // 合言葉が未入力なら尋ねる。入力しなければ、既存の記録は読み込まない（入力欄は触らない）
+    if (!getAccessKey() && !askAccessKey()) {
+      setStatus('合言葉が未入力のため、記録を読み込めません', 'error');
+      return;
+    }
+
     try {
-      const response = await fetch(`${GAS_URL}?date=${dateStr}`, {
+      const response = await fetch(gasGetUrl({ date: dateStr }), {
         method: 'GET',
       });
 
       const data = await response.json();
+
+      // 合言葉が違う場合は、入力欄をそのままにして、入れ直してもらう
+      if (data.status === 'unauthorized') {
+        forgetAccessKey();
+        if (askAccessKey('合言葉が違います。もう一度入力してください')) {
+          return loadExistingData();
+        }
+        setStatus('合言葉が違うため、記録を読み込めません', 'error');
+        return;
+      }
 
       // 通信を待っている間に入力が始まっていたら、ここでも上書きしない
       if (isDirty) {
@@ -1167,9 +1221,9 @@
 
   async function fetchEntryDates() {
     try {
-      const response = await fetch(`${GAS_URL}?action=dates`);
+      const response = await fetch(gasGetUrl({ action: 'dates' }));
       const data = await response.json();
-      entryDatesSet = new Set(data.dates || []);
+      entryDatesSet = new Set(data.status === 'unauthorized' ? [] : (data.dates || []));
     } catch (err) {
       console.log('カレンダー用データ取得失敗:', err.message);
       entryDatesSet = new Set();
