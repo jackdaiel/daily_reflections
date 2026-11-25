@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Daily Reflections</title>
 <!-- iPhone ホーム画面アイコン -->
 <link rel="apple-touch-icon" href="diarly180.png">
@@ -31,7 +31,8 @@
     --border-bright: #484f58;
   }
 
-  html { height: 100%; }
+  /* 画面の拡大（ピンチ）を無効にして、操作を安定させる（スクロールは今までどおり） */
+  html { height: 100%; touch-action: pan-x pan-y; }
 
   body {
     font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -254,22 +255,6 @@
   @keyframes entrySlideIn {
     from { opacity: 0; transform: translateX(-8px); }
     to   { opacity: 1; transform: translateX(0); }
-  }
-
-  .entry-number {
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
-    color: var(--text-muted);
-    background: var(--bg-hover);
-    border-radius: 6px;
-    flex-shrink: 0;
-    margin-top: 6px;
-    border: 1px solid var(--border);
   }
 
   .entry-wrapper {
@@ -1266,6 +1251,9 @@
     }
   }
 
+  // iPhoneのSafari／ホーム画面アプリは meta の指定を無視してピンチ拡大できてしまうため、ピンチ操作そのものを止める
+  ['gesturestart', 'gesturechange', 'gestureend'].forEach(t => document.addEventListener(t, e => e.preventDefault()));
+
   // 初期化
   window.addEventListener('DOMContentLoaded', () => {
     console.log('アプリ初期化開始');
@@ -1478,7 +1466,6 @@
     
     row.innerHTML = `
       <div class="drag-handle">≡</div>
-      <div class="entry-number">${entryCount}</div>
       <div class="entry-wrapper">
         <textarea class="entry-input" rows="2" placeholder="入力してください…"></textarea>
         ${entryCount > 3 ? '<button class="btn-remove" onclick="removeEntry(this)">×</button>' : ''}
@@ -1626,7 +1613,6 @@
     document.querySelectorAll('.entry-row').forEach(row => {
       row.classList.remove('drag-over');
     });
-    updateEntryNumbers();
     isDirty = true; // 並び順の変更も「未保存の変更」として扱う（日付移動の読み込みで消されないように）
   }
 
@@ -1721,7 +1707,6 @@
     } else if (container.lastElementChild !== current) {
       container.appendChild(current);
     }
-    updateEntryNumbers();
 
     // 画面の上下の端に近いときは、その方向へスクロール
     const edge = 70;
@@ -1744,18 +1729,7 @@
     const moved = endIndex !== touchDrag.startIndex;
     touchDrag = null;
 
-    updateEntryNumbers();
     if (moved) isDirty = true; // 並び順の変更も「未保存の変更」として扱う
-  }
-
-  function updateEntryNumbers() {
-    const rows = document.querySelectorAll('.entry-row');
-    rows.forEach((row, index) => {
-      const numberEl = row.querySelector('.entry-number');
-      if (numberEl) {
-        numberEl.textContent = index + 1;
-      }
-    });
   }
 
   // カレンダー機能
