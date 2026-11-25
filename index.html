@@ -414,9 +414,9 @@
 
   /* 写真欄（1日2枚まで。端末で縮小してから送る） */
   .photo-section {
-    margin-top: 24px;
-    padding-top: 20px;
-    border-top: 1px solid var(--border);
+    margin-bottom: 24px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
   }
 
   .photo-grid {
@@ -495,6 +495,8 @@
   .photo-remove:hover { color: var(--error); border-color: var(--error); }
 
   .btn-photo-add[disabled] { opacity: 0.4; cursor: default; }
+
+  .photo-note:empty { display: none; }
 
   .photo-note {
     margin-top: 8px;
@@ -802,6 +804,16 @@
   </div>
 
   <div class="card">
+    <div class="photo-section">
+      <div class="photo-grid" id="photoGrid"></div>
+      <button type="button" class="btn-add btn-photo-add" id="btnPhotoAdd" onclick="document.getElementById('photoFile').click()">
+        <span>＋</span>
+        <span>写真を追加</span>
+      </button>
+      <input type="file" id="photoFile" accept="image/*" multiple hidden>
+      <div class="photo-note" id="photoNote"></div>
+    </div>
+
     <div class="entries" id="entriesContainer">
       <!-- エントリーは動的に生成 -->
     </div>
@@ -816,17 +828,6 @@
     <div class="health-section">
       <label class="health-label" for="healthInput">体調</label>
       <textarea class="health-input" id="healthInput" rows="2" placeholder="今日の体調（任意）"></textarea>
-    </div>
-
-    <div class="photo-section">
-      <div class="health-label">写真</div>
-      <div class="photo-grid" id="photoGrid"></div>
-      <button type="button" class="btn-add btn-photo-add" id="btnPhotoAdd" onclick="document.getElementById('photoFile').click()">
-        <span>＋</span>
-        <span>写真を追加</span>
-      </button>
-      <input type="file" id="photoFile" accept="image/*" multiple hidden>
-      <div class="photo-note" id="photoNote"></div>
     </div>
 
     <div class="submit-area">
