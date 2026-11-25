@@ -223,7 +223,8 @@
   }
 
   .drag-handle {
-    width: 20px;
+    width: 32px;               /* 指で押しやすい大きさ（左右の余白は負のマージンで相殺し、見た目の幅は従来どおり） */
+    margin: 0 -6px;
     min-height: 40px;
     display: flex;
     align-items: center;
@@ -232,11 +233,22 @@
     cursor: grab;
     font-size: 18px;
     user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: none;        /* ここを指で動かしても画面スクロールにならない（並び替え用） */
     flex-shrink: 0;
   }
 
   .drag-handle:active {
     cursor: grabbing;
+  }
+
+  /* 指で並び替え中の行（opacity/transform は入場アニメで上書きされるため、枠と背景で示す） */
+  .entry-row.touch-dragging {
+    outline: 1px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: 8px;
+    background: rgba(88, 166, 255, 0.08);
   }
 
   @keyframes entrySlideIn {
@@ -1139,6 +1151,10 @@
     row.addEventListener('drop', handleDrop);
     row.addEventListener('dragenter', handleDragEnter);
     row.addEventListener('dragleave', handleDragLeave);
+
+    // 指（タッチ・ペン）での並び替え：ハンドル「≡」を押したまま動かす
+    // （上のドラッグ&ドロップはマウス用で、スマホでは発生しないため）
+    row.querySelector('.drag-handle').addEventListener('pointerdown', handleTouchDragStart);
   }
 
   function removeEntry(btn) {
@@ -1228,6 +1244,7 @@
       row.classList.remove('drag-over');
     });
     updateEntryNumbers();
+    isDirty = true; // 並び順の変更も「未保存の変更」として扱う（日付移動の読み込みで消されないように）
   }
 
   function handleDragOver(e) {
@@ -1267,6 +1284,85 @@
     }
 
     return false;
+  }
+
+  // ── 指（タッチ・ペン）での並び替え ──
+  // ハンドルを押す → 指を上下に動かす（他の行の中央を越えたら入れ替わる）→ 離すと確定。
+  // 画面の端に近づくと、自動でスクロールする。
+  let touchDrag = null;
+
+  function handleTouchDragStart(e) {
+    if (e.pointerType === 'mouse') return; // マウスは従来のドラッグ&ドロップ
+    if (touchDrag) return;
+    e.preventDefault();
+
+    const row = this.closest('.entry-row');
+    const container = document.getElementById('entriesContainer');
+    touchDrag = {
+      row: row,
+      pointerId: e.pointerId,
+      startIndex: [...container.querySelectorAll('.entry-row')].indexOf(row),
+      wasDraggable: row.draggable,
+    };
+    row.draggable = false; // 長押しでブラウザ標準のドラッグが始まって、邪魔されないように
+    row.classList.add('touch-dragging');
+
+    // 行を動かす（DOM上で付け替える）たびに、入場アニメーションが最初からやり直されて
+    // 行が一瞬消えるのを防ぐ。アニメーションを止めるとき、表示状態（opacity）は明示的に保つ。
+    document.querySelectorAll('.entry-row').forEach(r => {
+      r.style.animation = 'none';
+      r.style.opacity = '1';
+    });
+
+    document.addEventListener('pointermove', handleTouchDragMove, { passive: false });
+    document.addEventListener('pointerup', handleTouchDragEnd);
+    document.addEventListener('pointercancel', handleTouchDragEnd);
+  }
+
+  function handleTouchDragMove(e) {
+    if (!touchDrag || e.pointerId !== touchDrag.pointerId) return;
+    e.preventDefault();
+
+    const container = document.getElementById('entriesContainer');
+    const current = touchDrag.row;
+    const others = [...container.querySelectorAll('.entry-row')].filter(r => r !== current);
+
+    // 指の位置より下に中央がある、最初の行の手前に入れる（無ければ一番後ろ）
+    let before = null;
+    for (const r of others) {
+      const rect = r.getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) { before = r; break; }
+    }
+    if (before) {
+      if (current.nextElementSibling !== before) container.insertBefore(current, before);
+    } else if (container.lastElementChild !== current) {
+      container.appendChild(current);
+    }
+    updateEntryNumbers();
+
+    // 画面の上下の端に近いときは、その方向へスクロール
+    const edge = 70;
+    if (e.clientY < edge) window.scrollBy(0, -14);
+    else if (e.clientY > window.innerHeight - edge) window.scrollBy(0, 14);
+  }
+
+  function handleTouchDragEnd(e) {
+    if (!touchDrag || e.pointerId !== touchDrag.pointerId) return;
+
+    document.removeEventListener('pointermove', handleTouchDragMove);
+    document.removeEventListener('pointerup', handleTouchDragEnd);
+    document.removeEventListener('pointercancel', handleTouchDragEnd);
+
+    const row = touchDrag.row;
+    const container = document.getElementById('entriesContainer');
+    const endIndex = [...container.querySelectorAll('.entry-row')].indexOf(row);
+    row.classList.remove('touch-dragging');
+    row.draggable = touchDrag.wasDraggable;
+    const moved = endIndex !== touchDrag.startIndex;
+    touchDrag = null;
+
+    updateEntryNumbers();
+    if (moved) isDirty = true; // 並び順の変更も「未保存の変更」として扱う
   }
 
   function updateEntryNumbers() {
