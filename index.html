@@ -352,6 +352,54 @@
     background: rgba(88, 166, 255, 0.05);
   }
 
+  /* 体調欄（日記の入力欄とは別物。.entry-input は日記の件数を数えるのに使うので共用しない） */
+  .health-section {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+  }
+
+  .health-label {
+    display: block;
+    margin-bottom: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-secondary);
+    letter-spacing: 0.04em;
+  }
+
+  .health-input {
+    width: 100%;
+    min-height: 40px;
+    padding: 10px 14px;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    outline: none;
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 14px;
+    font-weight: 300;
+    line-height: 1.6;
+    color: var(--text-primary);
+    resize: none;
+    transition: all 0.2s ease;
+  }
+
+  .health-input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .health-input:focus {
+    border-color: var(--accent);
+    background: var(--bg-card);
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.1);
+  }
+
+  .health-input:hover:not(:focus) {
+    border-color: var(--border-bright);
+  }
+
   /* 送信ボタン */
   .submit-area {
     margin-top: 24px;
@@ -642,6 +690,11 @@
       </button>
     </div>
 
+    <div class="health-section">
+      <label class="health-label" for="healthInput">体調</label>
+      <textarea class="health-input" id="healthInput" rows="2" placeholder="今日の体調（任意）"></textarea>
+    </div>
+
     <div class="submit-area">
       <button class="btn-submit" id="submitBtn" onclick="submitDiary()">
         記録する
@@ -753,6 +806,21 @@
     return `${y}-${m}-${d}`;
   }
 
+  // ── 体調欄 ──
+  function getHealth() {
+    return document.getElementById('healthInput').value.trim();
+  }
+  // 内容に合わせて高さを調整する（枠線の分も含める）
+  function fitHealthHeight() {
+    const el = document.getElementById('healthInput');
+    el.style.height = 'auto';
+    if (el.value) el.style.height = (el.scrollHeight + el.offsetHeight - el.clientHeight) + 'px';
+  }
+  function setHealth(value) {
+    document.getElementById('healthInput').value = value || '';
+    fitHealthHeight();
+  }
+
   const _syncingDates = new Set(); // 同じ日付を同時に二重送信しないためのガード
 
   // record を送信し、本当にサーバーに届いたかを読み返して確認する。
@@ -772,7 +840,8 @@
           method: 'POST',
           mode: 'no-cors',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({ date: record.date, entries: record.entries, updateRow: record.updateRow, key: getAccessKey() })
+          // health が undefined（体調対応前に退避された記録）のときは、JSONに含まれず、サーバー側の体調は変わらない
+          body: JSON.stringify({ date: record.date, entries: record.entries, health: record.health, updateRow: record.updateRow, key: getAccessKey() })
         });
       } catch (err) {
         console.log('再送信できませんでした（オフラインの可能性）:', record.date, err.message);
@@ -790,8 +859,10 @@
             setStatus('合言葉が違うため送信できていません（記録は端末に残っています）。開き直して合言葉を入力してください', 'error');
             return;
           }
+          // 日記の内容と、体調（送った場合のみ）の両方がサーバーに反映されたら「届いた」とみなす
           const confirmed = data.status === 'found' && Array.isArray(data.entries) &&
-            JSON.stringify(data.entries) === JSON.stringify(record.entries);
+            JSON.stringify(data.entries) === JSON.stringify(record.entries) &&
+            (record.health === undefined || (data.health || '') === record.health);
 
           if (confirmed) {
             removePendingSave(record.date);
@@ -830,6 +901,11 @@
   // 初期化
   window.addEventListener('DOMContentLoaded', () => {
     console.log('アプリ初期化開始');
+    // 体調欄：入力したら「未保存」扱いにして、読み込みで上書きされないようにする（日記欄と同じ扱い）
+    document.getElementById('healthInput').addEventListener('input', function() {
+      fitHealthHeight();
+      isDirty = true;
+    });
     setToday();
     for (let i = 0; i < 3; i++) {
       addEntry();
@@ -924,6 +1000,7 @@
       while (entryCount < 3) {
         addEntry();
       }
+      setHealth(pending.health);
       isDirty = false;
       setStatus('前回送信できなかった内容を表示しています（再送中…）', 'sending');
       syncPendingRecord(pending);
@@ -959,7 +1036,8 @@
         return;
       }
 
-      if (data.status === 'found' && data.entries && data.entries.length > 0) {
+      // 日記か体調のどちらかが入っていれば「既存データあり」（体調だけの日もある）
+      if (data.status === 'found' && ((data.entries && data.entries.length > 0) || data.health)) {
         // 既存データがある場合
         currentUpdateRow = data.row;
 
@@ -978,6 +1056,7 @@
         while (entryCount < 3) {
           addEntry();
         }
+        setHealth(data.health);
         isDirty = false; // 読み込み直後は「未保存の入力」なし
 
         setStatus('既存データを読み込みました（編集可能）', 'success');
@@ -991,6 +1070,7 @@
         for (let i = 0; i < 3; i++) {
           addEntry();
         }
+        setHealth('');
         isDirty = false;
         setStatus('', '');
       }
@@ -1070,9 +1150,11 @@
   async function submitDiary() {
     const inputs = document.querySelectorAll('.entry-input');
     const entries = [...inputs].map(el => el.value.trim()).filter(v => v !== '');
+    const health = getHealth();
 
-    if (entries.length === 0) {
-      setStatus('少なくとも1つ入力してください', 'error');
+    // 日記か体調、どちらか1つでも入力されていれば保存できる
+    if (entries.length === 0 && health === '') {
+      setStatus('日記か体調を、少なくとも1つ入力してください', 'error');
       return;
     }
 
@@ -1084,7 +1166,7 @@
     document.getElementById('submitBtn').disabled = true;
 
     const dateStr = currentDateStr();
-    const record = { date: dateStr, entries: entries, updateRow: currentUpdateRow };
+    const record = { date: dateStr, entries: entries, health: health, updateRow: currentUpdateRow };
 
     console.log('送信データ:', JSON.stringify(record));
     console.log('送信先URL:', GAS_URL);
@@ -1114,6 +1196,7 @@
     for (let i = 0; i < 3; i++) {
       addEntry();
     }
+    setHealth('');
     setStatus('', '');
     document.getElementById('submitBtn').disabled = false;
   }
