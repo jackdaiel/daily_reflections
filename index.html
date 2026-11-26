@@ -201,6 +201,9 @@
     gap: 12px;
   }
 
+  /* 読み込み中：日記・体調・写真を操作できないようにする（前の日の内容を触らせない） */
+  .card.is-loading { opacity: 0.55; pointer-events: none; transition: opacity 0.15s ease; }
+
   .entry-row {
     display: flex;
     align-items: flex-start;
@@ -909,6 +912,25 @@
   let currentUpdateRow = null; // 更新対象の行番号
   let isDirty = false; // 未保存の入力があるかどうか（読み込みで上書きしないためのフラグ）
 
+  // ── 「画面の内容は、どの日付のものか」を管理する ──
+  // 画面の内容が、表示中の日付と違う日付のものになったまま保存されると、別の日に内容がコピーされてしまう。
+  // それを防ぐため、①日付の移動は未保存の変更を確認してから、②読み込み中は入力できない状態にして前の日の内容も消す、
+  // ③遅れて届いた古い読み込み結果は捨てる、④保存の直前に「内容の日付＝表示中の日付」を照合する。
+  let formDate = null;   // 今の画面の内容が属する日付（読み込み済み・入力開始済みの日付）。未確定のときは null
+  let loadSeq = 0;       // 読み込みの通し番号（古い読み込みの結果を捨てるため）
+  let navigating = false; // 日付の移動の確認中
+
+  function markDirty() {
+    isDirty = true;
+    if (!formDate) formDate = currentDateStr();
+  }
+
+  // 読み込み中は、日記・体調・写真を操作できないようにし、保存も止める
+  function setLoading(on) {
+    document.querySelector('.card').classList.toggle('is-loading', on);
+    document.getElementById('submitBtn').disabled = on;
+  }
+
   // ======================================================
   // 送信できなかった記録の退避キュー（localStorage）
   // 送信前にまずここへ書き、サーバーへの反映を読み返して確認できたら消す。
@@ -1139,7 +1161,7 @@
 
   function removePhoto(p) {
     photos = photos.filter(x => x !== p);
-    isDirty = true;
+    markDirty();
     renderPhotos();
   }
 
@@ -1147,13 +1169,15 @@
     const room = PHOTO_MAX - photos.length;
     const chosen = [...files].slice(0, Math.max(room, 0));
     if (files.length > chosen.length) setStatus('写真は1日2枚までです', 'error');
+    const dateAtStart = currentDateStr();
     for (const file of chosen) {
       try {
         const dataUrl = await resizeImage(file);
+        if (currentDateStr() !== dateAtStart || formDate !== dateAtStart) break; // 縮小している間に日付が動いた：別の日に付けない
         if (photos.length >= PHOTO_MAX) break;
         const p = { token: newPhotoToken(), dataUrl: dataUrl, status: 'uploading', local: true, promise: null };
         photos.push(p);
-        isDirty = true;
+        markDirty();
         renderPhotos();
         ensurePhotoUploaded(p);
       } catch (err) {
@@ -1260,7 +1284,7 @@
     // 体調欄：入力したら「未保存」扱いにして、読み込みで上書きされないようにする（日記欄と同じ扱い）
     document.getElementById('healthInput').addEventListener('input', function() {
       fitHealthHeight();
-      isDirty = true;
+      markDirty();
     });
     document.getElementById('photoFile').addEventListener('change', function() {
       const files = [...this.files];
@@ -1278,33 +1302,77 @@
   });
 
   function setToday() {
-    console.log('setToday 呼び出し');
-    selectedDate = new Date();
-    const year = selectedDate.getFullYear();
-    const month = String(selectedDate.getMonth() + 1).padStart(2, '0');
-    const day = String(selectedDate.getDate()).padStart(2, '0');
-    document.getElementById('dateInput').value = `${year}-${month}-${day}`;
-    updateDateDisplay();
-    loadExistingData();
+    goToDate(formatDateStr(new Date()));
   }
 
   function changeDate(delta) {
-    console.log('changeDate 呼び出し:', delta);
-    const currentDate = new Date(selectedDate);
-    currentDate.setDate(currentDate.getDate() + delta);
-    selectedDate = currentDate;
-    const year = selectedDate.getFullYear();
-    const month = String(selectedDate.getMonth() + 1).padStart(2, '0');
-    const day = String(selectedDate.getDate()).padStart(2, '0');
-    document.getElementById('dateInput').value = `${year}-${month}-${day}`;
-    updateDateDisplay();
-    loadExistingData();
+    const d = new Date(selectedDate);
+    d.setDate(d.getDate() + delta);
+    goToDate(formatDateStr(d));
   }
 
   function onDateInputChange() {
-    console.log('onDateInputChange 呼び出し');
+    goToDate(document.getElementById('dateInput').value);
+  }
+
+  function dateLabel(dateStr) {
+    const [, m, d] = dateStr.split('-');
+    return `${Number(m)}月${Number(d)}日`;
+  }
+
+  // 日付入力欄の表示を、今の日付に戻す
+  function restoreDateInput() {
+    document.getElementById('dateInput').value = currentDateStr();
     updateDateDisplay();
+  }
+
+  // すべての日付の移動（‹ › 今日 日付入力 カレンダー）はここを通る。
+  // 未保存の変更があるときは、その内容を別の日に持ち越さないよう、保存するか破棄するかを必ず確認する。
+  async function goToDate(newDateStr) {
+    if (navigating) { restoreDateInput(); return; } // 確認中の二重操作は無視
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(newDateStr || ''))) { restoreDateInput(); return; }
+
+    const cur = currentDateStr();
+    if (newDateStr === cur) {
+      restoreDateInput();
+      if (!isDirty) loadExistingData(); // 同じ日付：読み込み直すだけ（未保存の変更があるときは何もしない）
+      return;
+    }
+
+    if (isDirty) {
+      navigating = true;
+      try {
+        const label = dateLabel(cur);
+        if (confirm(`${label}の内容に、保存していない変更があります。\n\n保存してから移動しますか？\n\nOK：保存して移動\nキャンセル：次へ`)) {
+          const saved = await submitDiary(); // 保存は、まだ元の日付（cur）のまま行われる
+          if (!saved) { restoreDateInput(); return; }
+        } else if (!confirm(`保存せずに移動しますか？\n\n${label}の保存していない変更は、破棄されます。\n\nOK：破棄して移動\nキャンセル：移動しない`)) {
+          restoreDateInput();
+          return;
+        }
+        isDirty = false;
+      } finally {
+        navigating = false;
+      }
+    }
+
+    selectedDate = new Date(newDateStr + 'T00:00:00');
+    document.getElementById('dateInput').value = newDateStr;
+    updateDateDisplay();
+    resetFormForLoad(); // 前の日の内容を画面に残さない
     loadExistingData();
+  }
+
+  // 日付を移動した直後：前の日の内容を消して、読み込み中の状態にする
+  function resetFormForLoad() {
+    document.getElementById('entriesContainer').innerHTML = '';
+    entryCount = 0;
+    for (let i = 0; i < 3; i++) addEntry();
+    setHealth('');
+    setPhotos(undefined);
+    currentUpdateRow = null;
+    formDate = null;
+    isDirty = false;
   }
 
   function updateDateDisplay() {
@@ -1336,60 +1404,76 @@
 
   // 既存データの読み込み
   async function loadExistingData() {
-    // 入力中の内容がある場合は、読み込みで上書きしない（データ消失防止）
+    // 未保存の入力があるときは、日付を移動する前に goToDate が確認する。ここに来た時点では通常は無い（念のための保険）。
     if (isDirty) {
       console.log('未保存の入力があるため読み込みをスキップしました');
-      setStatus('未保存の入力があるため、この日の読み込みを保留しました', 'success');
+      setStatus('未保存の入力があるため、読み込みを保留しました', 'success');
       return;
     }
 
-    const year = selectedDate.getFullYear();
-    const month = String(selectedDate.getMonth() + 1).padStart(2, '0');
-    const day = String(selectedDate.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day}`;
+    const dateStr = currentDateStr();
+    const seq = ++loadSeq;
+    // この読み込みの結果を、まだ画面に反映してよいか（その間に別の日付へ移動していたら、反映しない）
+    const stillCurrent = () => seq === loadSeq && dateStr === currentDateStr();
 
-    // この日付に送信できていない記録が残っている場合は、サーバーの（古い）内容より
-    // そちらを優先して表示し、裏で再送する
-    const pending = getPendingSaveFor(dateStr);
-    if (pending) {
-      currentUpdateRow = pending.updateRow;
-      document.getElementById('entriesContainer').innerHTML = '';
-      entryCount = 0;
-      pending.entries.forEach(entry => {
-        addEntry();
-        const inputs = document.querySelectorAll('.entry-input');
-        inputs[inputs.length - 1].value = entry;
-      });
-      while (entryCount < 3) {
-        addEntry();
-      }
-      setHealth(pending.health);
-      setPhotos(pending.photos);
-      isDirty = false;
-      setStatus('前回送信できなかった内容を表示しています（再送中…）', 'sending');
-      syncPendingRecord(pending);
-      return;
-    }
-
-    // 合言葉が未入力なら尋ねる。入力しなければ、既存の記録は読み込まない（入力欄は触らない）
-    if (!getAccessKey() && !askAccessKey()) {
-      setStatus('合言葉が未入力のため、記録を読み込めません', 'error');
-      return;
-    }
+    setLoading(true);
+    setStatus('読み込み中…', 'sending');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000); // 応答が無いまま画面が固まらないように
 
     try {
+      // この日付に送信できていない記録が残っている場合は、サーバーの（古い）内容より
+      // そちらを優先して表示し、裏で再送する
+      const pending = getPendingSaveFor(dateStr);
+      if (pending) {
+        currentUpdateRow = pending.updateRow;
+        document.getElementById('entriesContainer').innerHTML = '';
+        entryCount = 0;
+        pending.entries.forEach(entry => {
+          addEntry();
+          const inputs = document.querySelectorAll('.entry-input');
+          inputs[inputs.length - 1].value = entry;
+        });
+        while (entryCount < 3) {
+          addEntry();
+        }
+        setHealth(pending.health);
+        setPhotos(pending.photos);
+        isDirty = false;
+        formDate = dateStr;
+        setStatus('前回送信できなかった内容を表示しています（再送中…）', 'sending');
+        syncPendingRecord(pending);
+        return;
+      }
+
+      // 合言葉が未入力なら尋ねる。入力しなければ、既存の記録は読み込まない（入力欄は空のまま）
+      if (!getAccessKey() && !askAccessKey()) {
+        formDate = dateStr;
+        setStatus('合言葉が未入力のため、記録を読み込めません', 'error');
+        return;
+      }
+
       const response = await fetch(gasGetUrl({ date: dateStr }), {
         method: 'GET',
+        signal: ctrl.signal,
       });
 
       const data = await response.json();
+
+      // 待っている間に別の日付へ移動していたら、この結果は捨てる（今の日付の画面を上書きしない）
+      if (!stillCurrent()) {
+        console.log('古い読み込み結果のため捨てました:', dateStr);
+        return;
+      }
 
       // 合言葉が違う場合は、入力欄をそのままにして、入れ直してもらう
       if (data.status === 'unauthorized') {
         forgetAccessKey();
         if (askAccessKey('合言葉が違います。もう一度入力してください')) {
+          clearTimeout(timer);
           return loadExistingData();
         }
+        formDate = dateStr;
         setStatus('合言葉が違うため、記録を読み込めません', 'error');
         return;
       }
@@ -1423,6 +1507,7 @@
         setHealth(data.health);
         setPhotos(data.photos); // 古いサーバー（写真未対応）のときは undefined → 写真欄は触れない扱い
         isDirty = false; // 読み込み直後は「未保存の入力」なし
+        formDate = dateStr;
 
         setStatus('既存データを読み込みました（編集可能）', 'success');
         setTimeout(() => setStatus('', ''), 3000);
@@ -1438,20 +1523,29 @@
         setHealth('');
         setPhotos(data.status === 'not_found' ? [] : data.photos);
         isDirty = false;
+        formDate = dateStr;
         setStatus('', '');
       }
 
     } catch (err) {
       console.log('データ読み込み中:', err.message);
-      // エラーでも新規作成モードで続行（エラーメッセージは表示しない）
+      if (!stillCurrent()) return;
+      // 読み込めなかったときも、空の入力欄で続行する（オフラインでも書けて、あとで再送される）。前の日の内容は残さない。
       currentUpdateRow = null;
       setPhotos(undefined); // 写真の状態が分からないので、保存時に写真は送らない
-      if (entryCount === 0) {
+      if (!isDirty) {
+        document.getElementById('entriesContainer').innerHTML = '';
+        entryCount = 0;
         for (let i = 0; i < 3; i++) {
           addEntry();
         }
-        isDirty = false;
+        setHealth('');
       }
+      formDate = dateStr;
+      setStatus('この日の記録を読み込めませんでした（通信を確認してください）', 'error');
+    } finally {
+      clearTimeout(timer);
+      if (seq === loadSeq) setLoading(false);
     }
   }
 
@@ -1480,7 +1574,7 @@
     textarea.addEventListener('input', function() {
       this.style.height = 'auto';
       this.style.height = this.scrollHeight + 'px';
-      isDirty = true;
+      markDirty();
     });
     
     // Tabキー対応
@@ -1517,7 +1611,14 @@
     setTimeout(() => row.remove(), 300);
   }
 
+  // 戻り値：記録を受け付けた（端末に退避して送信を始めた）ら true、保存しなかったら false
   async function submitDiary() {
+    // 最後の砦：画面の内容が属する日付と、表示中の日付が違うときは、絶対に保存しない（別の日へのコピーを防ぐ）
+    if (formDate !== currentDateStr()) {
+      setStatus('画面の内容と日付が合っていないため保存しませんでした。日付を選び直してください', 'error');
+      return false;
+    }
+
     const inputs = document.querySelectorAll('.entry-input');
     const entries = [...inputs].map(el => el.value.trim()).filter(v => v !== '');
     const health = getHealth();
@@ -1525,12 +1626,12 @@
     // 日記・体調・写真のどれか1つでも入っていれば保存できる
     if (entries.length === 0 && health === '' && photos.length === 0) {
       setStatus('日記・体調・写真のどれかを、少なくとも1つ入力してください', 'error');
-      return;
+      return false;
     }
 
     if (GAS_URL === 'YOUR_GAS_WEB_APP_URL') {
       setStatus('⚠ GASのURLを設定してください', 'error');
-      return;
+      return false;
     }
 
     document.getElementById('submitBtn').disabled = true;
@@ -1544,9 +1645,15 @@
       if (results.some(ok => !ok)) {
         setStatus('写真を送信できていません。通信を確認して、もう一度「記録する」を押してください（写真を外せば、日記だけ保存できます）', 'error');
         document.getElementById('submitBtn').disabled = false;
-        return;
+        return false;
       }
       setStatus('', '');
+      // 写真の送信を待っている間に日付が動いていたら、保存しない
+      if (formDate !== currentDateStr()) {
+        setStatus('画面の内容と日付が合っていないため保存しませんでした。日付を選び直してください', 'error');
+        document.getElementById('submitBtn').disabled = false;
+        return false;
+      }
     }
 
     const dateStr = currentDateStr();
@@ -1566,6 +1673,7 @@
 
     // 実際の送信と、本当に届いたかの確認・必要なら再送は、すべて裏で行う
     syncPendingRecord(record);
+    return true;
   }
 
   function setStatus(msg, type) {
@@ -1583,6 +1691,7 @@
     }
     setHealth('');
     setPhotos([]);
+    formDate = currentDateStr();
     setStatus('', '');
     document.getElementById('submitBtn').disabled = false;
   }
@@ -1613,7 +1722,7 @@
     document.querySelectorAll('.entry-row').forEach(row => {
       row.classList.remove('drag-over');
     });
-    isDirty = true; // 並び順の変更も「未保存の変更」として扱う（日付移動の読み込みで消されないように）
+    markDirty(); // 並び順の変更も「未保存の変更」として扱う
   }
 
   function handleDragOver(e) {
@@ -1729,7 +1838,7 @@
     const moved = endIndex !== touchDrag.startIndex;
     touchDrag = null;
 
-    if (moved) isDirty = true; // 並び順の変更も「未保存の変更」として扱う
+    if (moved) markDirty(); // 並び順の変更も「未保存の変更」として扱う
   }
 
   // カレンダー機能
@@ -1807,10 +1916,8 @@
   }
 
   function selectCalendarDate(dateStr) {
-    document.getElementById('dateInput').value = dateStr;
-    updateDateDisplay();
-    loadExistingData();
     closeCalendar();
+    goToDate(dateStr);
   }
 </script>
 </body>
