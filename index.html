@@ -509,7 +509,7 @@
     background: rgba(0, 0, 0, 0.92);
     align-items: center;
     justify-content: center;
-    padding: 16px;
+    padding: 16px 16px calc(84px + env(safe-area-inset-bottom));  /* 下に削除ボタンの分の余白 */
     cursor: zoom-out;
   }
 
@@ -519,6 +519,22 @@
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
+  }
+
+  .photo-viewer-delete {
+    position: absolute;
+    left: 50%;
+    bottom: calc(24px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    padding: 11px 24px;
+    background: rgba(10, 14, 20, 0.85);
+    border: 1px solid var(--border-bright);
+    border-radius: 999px;
+    color: var(--error);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 14px;
+    cursor: pointer;
+    white-space: nowrap;
   }
 
   /* 送信ボタン */
@@ -847,6 +863,7 @@
 <!-- 写真の拡大表示（タップで閉じる） -->
 <div class="photo-viewer" id="photoViewer" onclick="closePhotoViewer()">
   <img id="photoViewerImg" alt="">
+  <button type="button" class="photo-viewer-delete" id="photoViewerDelete" onclick="deleteViewedPhoto(event)">この写真を削除</button>
 </div>
 
 <!-- 送信完了オーバーレイ -->
@@ -1126,7 +1143,7 @@
         const img = document.createElement('img');
         img.src = p.dataUrl;
         img.alt = '日記の写真';
-        img.addEventListener('click', () => openPhotoViewer(p.dataUrl));
+        img.addEventListener('click', () => openPhotoViewer(p));
         item.appendChild(img);
       }
       if (p.status !== 'done') {
@@ -1141,13 +1158,17 @@
         }
         item.appendChild(st);
       }
-      const rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'photo-remove';
-      rm.setAttribute('aria-label', '写真を外す');
-      rm.textContent = '×';
-      rm.addEventListener('click', () => removePhoto(p));
-      item.appendChild(rm);
+      // 写真が表示できているときは、×は付けない（写真をタップして拡大した画面から削除する）。
+      // 写真が表示できていないとき（読み込み失敗など）は、拡大できないので、従来どおり×で外せるようにしておく。
+      if (!p.dataUrl) {
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'photo-remove';
+        rm.setAttribute('aria-label', '写真を外す');
+        rm.textContent = '×';
+        rm.addEventListener('click', () => removePhoto(p));
+        item.appendChild(rm);
+      }
       grid.appendChild(item);
     });
 
@@ -1187,13 +1208,25 @@
     }
   }
 
-  function openPhotoViewer(dataUrl) {
-    document.getElementById('photoViewerImg').src = dataUrl;
+  let viewedPhoto = null; // 拡大表示中の写真
+  function openPhotoViewer(p) {
+    viewedPhoto = p;
+    document.getElementById('photoViewerImg').src = p.dataUrl;
     document.getElementById('photoViewer').classList.add('show');
   }
   function closePhotoViewer() {
+    viewedPhoto = null;
     document.getElementById('photoViewer').classList.remove('show');
     document.getElementById('photoViewerImg').removeAttribute('src');
+  }
+  // 拡大表示の「この写真を削除」：確認してから外す（外した内容は「記録する」を押すと確定する）
+  function deleteViewedPhoto(e) {
+    e.stopPropagation(); // 背景のタップ（閉じる）として扱わない
+    const p = viewedPhoto;
+    if (!p) return;
+    if (!confirm('この写真を削除しますか？\n（「記録する」を押すと確定します）')) return;
+    closePhotoViewer();
+    removePhoto(p);
   }
 
   const _syncingDates = new Set(); // 同じ日付を同時に二重送信しないためのガード
@@ -1437,6 +1470,7 @@
         while (entryCount < 3) {
           addEntry();
         }
+        fitAllEntryHeights();
         setHealth(pending.health);
         setPhotos(pending.photos);
         isDirty = false;
@@ -1504,6 +1538,7 @@
         while (entryCount < 3) {
           addEntry();
         }
+        fitAllEntryHeights();
         setHealth(data.health);
         setPhotos(data.photos); // 古いサーバー（写真未対応）のときは undefined → 写真欄は触れない扱い
         isDirty = false; // 読み込み直後は「未保存の入力」なし
@@ -1549,6 +1584,23 @@
     }
   }
 
+  // 日記の入力欄を、文章の長さに合わせた高さにする（全文が見えるように）。枠線の分も含める。
+  // 画面に出ていない（高さが測れない）ときは何もしない。
+  function fitEntryHeight(el) {
+    el.style.height = 'auto';
+    if (!el.scrollHeight) return;
+    el.style.height = (el.scrollHeight + el.offsetHeight - el.clientHeight) + 'px';
+  }
+  function fitAllEntryHeights() {
+    document.querySelectorAll('.entry-input').forEach(fitEntryHeight);
+  }
+  // 画面の幅が変わったとき（横向きにしたとき等）と、文字の読み込みが終わったときは、折り返しが変わるので合わせ直す
+  let _fitWidth = window.innerWidth;
+  window.addEventListener('resize', () => {
+    if (window.innerWidth !== _fitWidth) { _fitWidth = window.innerWidth; fitAllEntryHeights(); }
+  });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitAllEntryHeights);
+
   function addEntry() {
     entryCount++;
     const container = document.getElementById('entriesContainer');
@@ -1572,8 +1624,7 @@
     
     // 自動リサイズ + 未保存フラグを立てる（読み込みに上書きされないようにする）
     textarea.addEventListener('input', function() {
-      this.style.height = 'auto';
-      this.style.height = this.scrollHeight + 'px';
+      fitEntryHeight(this);
       markDirty();
     });
     
