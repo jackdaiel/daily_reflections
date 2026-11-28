@@ -335,8 +335,8 @@
     gap: 8px;
   }
 
-  .add-row .btn-add { width: auto; flex: 1; }
-  .add-row .btn-photo-add { flex: 0 0 auto; padding-left: 18px; padding-right: 18px; }
+  /* 2つのボタンは同じ幅（半分ずつ） */
+  .add-row .btn-add { width: auto; flex: 1 1 0; min-width: 0; white-space: nowrap; }
 
   .btn-add {
     width: 100%;
@@ -828,11 +828,11 @@
       <div class="add-row">
         <button class="btn-add" id="btnAdd" onclick="addEntry()">
           <span>+</span>
-          <span>追加する</span>
+          <span>日記を追加</span>
         </button>
         <button type="button" class="btn-add btn-photo-add" id="btnPhotoAdd" onclick="document.getElementById('photoFile').click()">
           <span>📷</span>
-          <span>写真</span>
+          <span>写真を追加</span>
         </button>
       </div>
       <input type="file" id="photoFile" accept="image/*" multiple hidden>
